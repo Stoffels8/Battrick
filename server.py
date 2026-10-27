@@ -36,45 +36,45 @@ def fetch_squad():
     soup = BeautifulSoup(resp.text, 'lxml')
     players = []
 
-    for row in soup.select('table tr'):
-        cells = row.find_all('td')
-        if len(cells) < 4:
+    # Battrick squad page uses div.player with CSS spans for each field
+    for player_div in soup.select('div.player'):
+        # Name + player ID
+        name_link = player_div.select_one('span.player_name a[href*="playerID="]')
+        if not name_link:
             continue
-
-        # Player link — contains playerID
-        link = row.find('a', href=re.compile(r'playerID=(\d+)'))
-        if not link:
-            continue
-        pid_match = re.search(r'playerID=(\d+)', link['href'])
+        pid_match = re.search(r'playerID=(\d+)', name_link['href'])
         if not pid_match:
             continue
         player_id = int(pid_match.group(1))
-        name = link.get_text(strip=True)
+        name = name_link.get_text(strip=True)
 
-        # Find wage cell (contains £ or number after name)
-        wage = 0
+        # Wage: span.player_wage contains e.g. "£144,233"
+        wage_span = player_div.select_one('span.player_wage')
+        if not wage_span:
+            continue
+        wage_text = wage_span.get_text(strip=True).replace(',', '').replace('£', '').replace('$', '').strip()
+        try:
+            wage = int(wage_text)
+        except ValueError:
+            continue
+
+        # BTR: span.player_btr contains e.g. "176,162"
+        btr_span = player_div.select_one('span.player_btr')
         btr = 0
-        for cell in cells:
-            text = cell.get_text(strip=True).replace(',', '').replace('£', '').replace('$', '')
-            # Wage: typically a 3-5 digit number in a cell by itself
-            if re.match(r'^\d{2,5}$', text):
-                val = int(text)
-                if 10 <= val <= 5000 and wage == 0:
-                    wage = val
-            # BTR: decimal number like 123456.78
-            if re.match(r'^\d{4,7}(\.\d+)?$', text):
-                val = float(text)
-                if val > 999 and btr == 0:
-                    btr = val
+        if btr_span:
+            btr_text = btr_span.get_text(strip=True).replace(',', '').strip()
+            try:
+                btr = int(btr_text)
+            except ValueError:
+                btr = 0
 
-        if wage > 0:
-            players.append({
-                'player_id': player_id,
-                'name': name,
-                'wage': wage,
-                'btr': btr,
-                'eligible': wage < 1000
-            })
+        players.append({
+            'player_id': player_id,
+            'name': name,
+            'wage': wage,
+            'btr': btr,
+            'eligible': wage < 1000
+        })
 
     if not players:
         return jsonify({'error': 'No players found — check the URL is a Battrick squad page'}), 400
