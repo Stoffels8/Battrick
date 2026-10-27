@@ -111,65 +111,73 @@ def fetch_match():
 
     soup = BeautifulSoup(resp.text, 'lxml')
 
-    # Find innings tables — Battrick match pages have two batting scorecards
+    # Battrick uses table.scorecard — batting tables have "First Innings of:" in first row
     innings = []
-    for table in soup.select('table'):
-        rows = table.find_all('tr')
-        if len(rows) < 3:
-            continue
-        headers = [th.get_text(strip=True).lower() for th in rows[0].find_all(['th', 'td'])]
-        if not any('batsman' in h or 'batter' in h or 'batting' in h for h in headers):
-            continue
+    for table in soup.select('table.scorecard'):
+        first_row_text = table.find('tr').get_text(' ', strip=True) if table.find('tr') else ''
+        if 'First Innings of' not in first_row_text and 'Second Innings of' not in first_row_text:
+            continue  # skip FOW and bowling tables
 
         batters = []
         runs = 0
         wickets = 0
         overs = 0.0
+        team_name = ''
 
-        for row in rows[1:]:
-            cells = [td.get_text(strip=True) for td in row.find_all('td')]
+        # Extract team name from the innings header link
+        team_link = table.select_one('tr:first-child a[href*="office.asp"]')
+        if team_link:
+            team_name = team_link.get_text(strip=True)
+
+        for row in table.find_all('tr'):
+            cells = row.find_all('td')
             if not cells:
                 continue
+            cell_texts = [td.get_text(strip=True) for td in cells]
+            joined = ' '.join(cell_texts)
 
-            # Totals row
-            text = ' '.join(cells).lower()
-            if 'total' in text or 'extras' in text:
-                # Try to extract total runs and wickets
-                for cell in cells:
-                    m = re.search(r'(\d+)\s*/\s*(\d+)', cell)
-                    if m:
-                        runs = int(m.group(1))
-                        wickets = int(m.group(2))
-                # Overs
-                for cell in cells:
-                    m = re.search(r'(\d+)\.(\d)', cell)
-                    if m:
-                        overs = float(f"{m.group(1)}.{m.group(2)}")
+            # Total row: "Total (42.2 overs, 10 wickets)" with runs in 4th cell
+            if joined.lower().startswith('total'):
+                # Extract overs and wickets from the text
+                m_overs = re.search(r'([\d]+\.[\d]+|[\d]+)\s*overs', joined)
+                m_wkts = re.search(r'(\d+)\s*wickets?', joined)
+                if m_overs:
+                    overs = float(m_overs.group(1))
+                if m_wkts:
+                    wickets = int(m_wkts.group(1))
+                # Runs are in the 4th cell (index 3)
+                if len(cells) >= 4:
+                    try:
+                        runs = int(cells[3].get_text(strip=True))
+                    except ValueError:
+                        pass
                 continue
 
-            # Player row — look for player link
-            link = row.find('a', href=re.compile(r'playerID=(\d+)'))
-            if not link:
+            # Batter row — first cell contains playerID link (not the inndetails link)
+            player_link = row.find('a', href=re.compile(r'playerdetails\.asp\?playerID=(\d+)'))
+            if not player_link:
                 continue
-            pid_match = re.search(r'playerID=(\d+)', link['href'])
+            pid_match = re.search(r'playerID=(\d+)', player_link['href'])
             if not pid_match:
                 continue
 
-            # Runs scored — usually 3rd or 4th cell
+            # Runs are in the 4th cell (index 3), right-aligned
             batter_runs = 0
-            for cell in cells[2:6]:
-                if re.match(r'^\d+\*?$', cell.strip()):
-                    batter_runs = int(cell.replace('*', ''))
-                    break
+            if len(cells) >= 4:
+                try:
+                    batter_runs = int(cells[3].get_text(strip=True))
+                except ValueError:
+                    pass
 
             batters.append({
                 'player_id': int(pid_match.group(1)),
-                'name': link.get_text(strip=True),
+                'name': player_link.get_text(strip=True),
                 'runs': batter_runs
             })
 
         if batters or runs > 0:
             innings.append({
+                'team': team_name,
                 'batters': batters,
                 'runs': runs,
                 'wickets': wickets,
@@ -179,26 +187,14 @@ def fetch_match():
     if len(innings) < 2:
         return jsonify({'error': 'Could not parse two innings from this match page'}), 400
 
-    # Determine home/away from page title or team names
-    # Battrick shows home team first
+    # Battrick shows home team bats first
     home = innings[0]
     away = innings[1]
 
-    # Try to get team names from page
-    home_team = ''
-    away_team = ''
-    title_el = soup.find('h1') or soup.find('title')
-    if title_el:
-        title = title_el.get_text(strip=True)
-        m = re.search(r'(.+?)\s+v[s]?\s+(.+)', title, re.IGNORECASE)
-        if m:
-            home_team = m.group(1).strip()
-            away_team = m.group(2).strip()
-
     return jsonify({
         'ok': True,
-        'home_team': home_team,
-        'away_team': away_team,
+        'home_team': home.get('team', ''),
+        'away_team': away.get('team', ''),
         'home_runs': home['runs'],
         'home_wickets': home['wickets'],
         'home_overs': home['overs'],
