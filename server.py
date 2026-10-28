@@ -136,7 +136,7 @@ def fetch_match():
             cell_texts = [td.get_text(strip=True) for td in cells]
             joined = ' '.join(cell_texts)
 
-            # Total row: "Total (42.2 overs, 10 wickets)" with runs in 4th cell
+            # Total row: colspan=3 cell "Total (42.2 overs, 10 wickets)" then runs cell
             if joined.lower().startswith('total'):
                 # Extract overs and wickets from the text
                 m_overs = re.search(r'([\d]+\.[\d]+|[\d]+)\s*overs', joined)
@@ -145,12 +145,12 @@ def fetch_match():
                     overs = float(m_overs.group(1))
                 if m_wkts:
                     wickets = int(m_wkts.group(1))
-                # Runs are in the 4th cell (index 3)
-                if len(cells) >= 4:
-                    try:
-                        runs = int(cells[3].get_text(strip=True))
-                    except ValueError:
-                        pass
+                # Runs: find the first cell that is purely a number (not the "Total (...)" cell)
+                for cell in cells:
+                    txt = cell.get_text(strip=True)
+                    if re.match(r'^\d+$', txt):
+                        runs = int(txt)
+                        break
                 continue
 
             # Batter row — first cell contains playerID link (not the inndetails link)
