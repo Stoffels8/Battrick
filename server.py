@@ -111,20 +111,40 @@ def fetch_match():
 
     soup = BeautifulSoup(resp.text, 'lxml')
 
-    # Battrick uses table.scorecard — batting tables have "First Innings of:" in first row
-    innings = []
-    for table in soup.select('table.scorecard'):
-        first_row_text = table.find('tr').get_text(' ', strip=True) if table.find('tr') else ''
-        if 'First Innings of' not in first_row_text and 'Second Innings of' not in first_row_text:
-            continue  # skip FOW and bowling tables
+    # Battrick uses table.scorecard for batting, bowling, and FOW tables.
+    # Batting tables: first row contains "First Innings of:" or "Second Innings of:"
+    # Bowling tables: immediately follow the batting table for the same innings;
+    #   their header row contains column headings like "Overs", "Mdns", "Runs", "Wkts"
+    #   (no innings label in the first row).
+    # FOW tables: also no innings label; we distinguish bowling from FOW by header content.
 
+    innings = []
+    all_tables = soup.select('table.scorecard')
+
+    def parse_int(txt):
+        try: return int(txt.strip())
+        except: return 0
+
+    def parse_float(txt):
+        try: return float(txt.strip())
+        except: return 0.0
+
+    i = 0
+    while i < len(all_tables):
+        table = all_tables[i]
+        first_row_text = table.find('tr').get_text(' ', strip=True) if table.find('tr') else ''
+
+        if 'First Innings of' not in first_row_text and 'Second Innings of' not in first_row_text:
+            i += 1
+            continue
+
+        # ── Batting table ──────────────────────────────────────────────────────
         batters = []
         runs = 0
         wickets = 0
         overs = 0.0
         team_name = ''
 
-        # Extract team name from the innings header link
         team_link = table.select_one('tr:first-child a[href*="office.asp"]')
         if team_link:
             team_name = team_link.get_text(strip=True)
@@ -136,16 +156,11 @@ def fetch_match():
             cell_texts = [td.get_text(strip=True) for td in cells]
             joined = ' '.join(cell_texts)
 
-            # Total row: colspan=3 cell "Total (42.2 overs, 10 wickets)" then runs cell
             if joined.lower().startswith('total'):
-                # Extract overs and wickets from the text
                 m_overs = re.search(r'([\d]+\.[\d]+|[\d]+)\s*overs', joined)
                 m_wkts = re.search(r'(\d+)\s*wickets?', joined)
-                if m_overs:
-                    overs = float(m_overs.group(1))
-                if m_wkts:
-                    wickets = int(m_wkts.group(1))
-                # Runs: find the first cell that is purely a number (not the "Total (...)" cell)
+                if m_overs: overs = float(m_overs.group(1))
+                if m_wkts: wickets = int(m_wkts.group(1))
                 for cell in cells:
                     txt = cell.get_text(strip=True)
                     if re.match(r'^\d+$', txt):
@@ -153,7 +168,6 @@ def fetch_match():
                         break
                 continue
 
-            # Batter row — first cell contains playerID link (not the inndetails link)
             player_link = row.find('a', href=re.compile(r'playerdetails\.asp\?playerID=(\d+)'))
             if not player_link:
                 continue
@@ -161,13 +175,10 @@ def fetch_match():
             if not pid_match:
                 continue
 
-            # Runs are in the 4th cell (index 3), right-aligned
             batter_runs = 0
             if len(cells) >= 4:
-                try:
-                    batter_runs = int(cells[3].get_text(strip=True))
-                except ValueError:
-                    pass
+                try: batter_runs = int(cells[3].get_text(strip=True))
+                except: pass
 
             batters.append({
                 'player_id': int(pid_match.group(1)),
@@ -175,34 +186,94 @@ def fetch_match():
                 'runs': batter_runs
             })
 
+        # ── Bowling table (next scorecard table after this batting table) ──────
+        bowlers = []
+        # Look ahead: next table(s) until we hit another innings table or run out
+        j = i + 1
+        while j < len(all_tables):
+            next_table = all_tables[j]
+            next_first = next_table.find('tr').get_text(' ', strip=True) if next_table.find('tr') else ''
+            # If it's a new innings table, stop
+            if 'First Innings of' in next_first or 'Second Innings of' in next_first:
+                break
+            # Check if this looks like a bowling table: header contains Overs/Mdns/Wkts
+            header_text = next_first.lower()
+            if 'overs' in header_text or 'mdns' in header_text or 'wkts' in header_text:
+                # Parse bowler rows — each has a playerID link
+                for row in next_table.find_all('tr'):
+                    cells = row.find_all('td')
+                    if not cells:
+                        continue
+                    player_link = row.find('a', href=re.compile(r'playerdetails\.asp\?playerID=(\d+)'))
+                    if not player_link:
+                        continue
+                    pid_match = re.search(r'playerID=(\d+)', player_link['href'])
+                    if not pid_match:
+                        continue
+                    # Bowling columns (after name): Overs, Mdns, Runs, Wkts, NB, WD
+                    # First cell is the name cell; numeric cells follow
+                    nums = []
+                    for cell in cells[1:]:
+                        txt = cell.get_text(strip=True)
+                        try:
+                            nums.append(float(txt))
+                        except:
+                            nums.append(None)
+                    # Battrick bowling columns: Overs, Mdns, Runs, Wkts, NB, WD
+                    def gn(idx, as_int=True):
+                        v = nums[idx] if idx < len(nums) and nums[idx] is not None else 0
+                        return int(v) if as_int else float(v)
+                    b_overs   = gn(0, as_int=False)
+                    b_maidens = gn(1)
+                    b_runs    = gn(2)
+                    b_wickets = gn(3)
+                    b_nb      = gn(4)
+                    b_wd      = gn(5)
+                    bowlers.append({
+                        'player_id': int(pid_match.group(1)),
+                        'name': player_link.get_text(strip=True),
+                        'overs':   b_overs,
+                        'maidens': b_maidens,
+                        'runs':    b_runs,
+                        'wickets': b_wickets,
+                        'nb':      b_nb,
+                        'wd':      b_wd,
+                    })
+                j += 1
+                break  # Only one bowling table per innings
+            j += 1
+
         if batters or runs > 0:
             innings.append({
-                'team': team_name,
+                'team':    team_name,
                 'batters': batters,
-                'runs': runs,
+                'bowlers': bowlers,
+                'runs':    runs,
                 'wickets': wickets,
-                'overs': overs
+                'overs':   overs
             })
+        i = j  # advance past any tables we consumed
 
     if len(innings) < 2:
         return jsonify({'error': 'Could not parse two innings from this match page'}), 400
 
-    # Battrick shows home team bats first
     home = innings[0]
     away = innings[1]
 
     return jsonify({
         'ok': True,
-        'home_team': home.get('team', ''),
-        'away_team': away.get('team', ''),
-        'home_runs': home['runs'],
+        'home_team':    home.get('team', ''),
+        'away_team':    away.get('team', ''),
+        'home_runs':    home['runs'],
         'home_wickets': home['wickets'],
-        'home_overs': home['overs'],
+        'home_overs':   home['overs'],
         'home_batting': home['batters'],
-        'away_runs': away['runs'],
+        'home_bowling': home['bowlers'],
+        'away_runs':    away['runs'],
         'away_wickets': away['wickets'],
-        'away_overs': away['overs'],
+        'away_overs':   away['overs'],
         'away_batting': away['batters'],
+        'away_bowling': away['bowlers'],
     })
 
 
