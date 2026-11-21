@@ -180,10 +180,39 @@ def fetch_match():
                 try: batter_runs = int(cells[3].get_text(strip=True))
                 except: pass
 
+            b_runs   = 0
+            b_balls  = 0
+            b_fours  = 0
+            b_sixes  = 0
+            not_out  = False
+            if len(cells) >= 4:
+                try: b_runs  = int(cells[3].get_text(strip=True))
+                except: pass
+            if len(cells) >= 5:
+                try: b_balls = int(cells[4].get_text(strip=True))
+                except: pass
+            if len(cells) >= 6:
+                try: b_fours = int(cells[5].get_text(strip=True))
+                except: pass
+            if len(cells) >= 7:
+                try: b_sixes = int(cells[6].get_text(strip=True))
+                except: pass
+            # "not out" if dismissal cells (1 and 2) are "not" / "out" or both empty
+            d1 = cells[1].get_text(strip=True).lower() if len(cells) > 1 else ''
+            d2 = cells[2].get_text(strip=True).lower() if len(cells) > 2 else ''
+            if d1 == 'not' and d2 == 'out':
+                not_out = True
+            elif d1 == '' and d2 == '' and b_runs >= 0:
+                not_out = True  # DNB / retired not out handled as not out
+
             batters.append({
                 'player_id': int(pid_match.group(1)),
                 'name': player_link.get_text(strip=True),
-                'runs': batter_runs
+                'runs':    b_runs,
+                'balls':   b_balls,
+                'fours':   b_fours,
+                'sixes':   b_sixes,
+                'not_out': not_out,
             })
 
         # ── Bowling table (next scorecard table after this batting table) ──────
