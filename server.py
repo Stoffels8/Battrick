@@ -197,8 +197,12 @@ def fetch_match():
                 cells = tr.find_all(['th', 'td'])
                 texts = [c.get_text(strip=True).lower() for c in cells]
                 joined = ' '.join(texts)
-                if ('overs' in texts or 'mdns' in texts or 'wkts' in texts or
-                        'overs' in joined and ('mdns' in joined or 'wkts' in joined or 'runs' in joined)):
+                # Battrick uses short headers: O, M, R, W (or long: Overs, Mdns, Runs, Wkts)
+                has_bowling_cols = (
+                    ('o' in texts and 'r' in texts and 'w' in texts) or
+                    'overs' in texts or 'mdns' in texts or 'wkts' in texts
+                )
+                if has_bowling_cols:
                     # Build column index map from this header row
                     col_map = {}
                     for idx, t in enumerate(texts):
