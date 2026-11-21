@@ -188,6 +188,29 @@ def fetch_match():
 
         # ── Bowling table (next scorecard table after this batting table) ──────
         bowlers = []
+
+        def is_bowling_table(tbl):
+            """Return (True, col_map) if this table looks like a bowling scorecard."""
+            # Check ALL rows (not just first) for the bowling column headers
+            for tr in tbl.find_all('tr'):
+                # Check th cells first, then td cells
+                cells = tr.find_all(['th', 'td'])
+                texts = [c.get_text(strip=True).lower() for c in cells]
+                joined = ' '.join(texts)
+                if ('overs' in texts or 'mdns' in texts or 'wkts' in texts or
+                        'overs' in joined and ('mdns' in joined or 'wkts' in joined or 'runs' in joined)):
+                    # Build column index map from this header row
+                    col_map = {}
+                    for idx, t in enumerate(texts):
+                        if t in ('overs', 'o'):    col_map['overs']   = idx
+                        elif t in ('mdns', 'm'):   col_map['mdns']    = idx
+                        elif t in ('runs', 'r'):   col_map['runs']    = idx
+                        elif t in ('wkts', 'w'):   col_map['wkts']    = idx
+                        elif t == 'nb':            col_map['nb']      = idx
+                        elif t == 'wd':            col_map['wd']      = idx
+                    return True, col_map
+            return False, {}
+
         # Look ahead: next table(s) until we hit another innings table or run out
         j = i + 1
         while j < len(all_tables):
@@ -196,9 +219,8 @@ def fetch_match():
             # If it's a new innings table, stop
             if 'First Innings of' in next_first or 'Second Innings of' in next_first:
                 break
-            # Check if this looks like a bowling table: header contains Overs/Mdns/Wkts
-            header_text = next_first.lower()
-            if 'overs' in header_text or 'mdns' in header_text or 'wkts' in header_text:
+            looks_like_bowling, col_map = is_bowling_table(next_table)
+            if looks_like_bowling:
                 # Parse bowler rows — each has a playerID link
                 for row in next_table.find_all('tr'):
                     cells = row.find_all('td')
@@ -210,25 +232,52 @@ def fetch_match():
                     pid_match = re.search(r'playerID=(\d+)', player_link['href'])
                     if not pid_match:
                         continue
-                    # Bowling columns (after name): Overs, Mdns, Runs, Wkts, NB, WD
-                    # First cell is the name cell; numeric cells follow
-                    nums = []
-                    for cell in cells[1:]:
-                        txt = cell.get_text(strip=True)
-                        try:
-                            nums.append(float(txt))
-                        except:
-                            nums.append(None)
-                    # Battrick bowling columns: Overs, Mdns, Runs, Wkts, NB, WD
-                    def gn(idx, as_int=True):
-                        v = nums[idx] if idx < len(nums) and nums[idx] is not None else 0
-                        return int(v) if as_int else float(v)
-                    b_overs   = gn(0, as_int=False)
-                    b_maidens = gn(1)
-                    b_runs    = gn(2)
-                    b_wickets = gn(3)
-                    b_nb      = gn(4)
-                    b_wd      = gn(5)
+
+                    cell_texts = [c.get_text(strip=True) for c in cells]
+
+                    def gc(key, as_int=False, default=0):
+                        """Get cell value by column name from col_map, falling back to positional."""
+                        # Try named column first
+                        if key in col_map:
+                            idx = col_map[key]
+                            if idx < len(cell_texts):
+                                try:
+                                    v = float(cell_texts[idx])
+                                    return int(v) if as_int else v
+                                except:
+                                    pass
+                        return default
+
+                    # Positional fallback: name, overs, mdns, runs, wkts, nb, wd
+                    # Find the name cell index (the one with the player link)
+                    name_idx = next((k for k, c in enumerate(cells) if c.find('a', href=re.compile(r'playerID='))), 0)
+
+                    def gp(offset, as_int=False):
+                        idx = name_idx + offset
+                        if idx < len(cell_texts):
+                            try:
+                                v = float(cell_texts[idx])
+                                return int(v) if as_int else v
+                            except:
+                                pass
+                        return 0
+
+                    # Use col_map if populated, else positional
+                    if col_map:
+                        b_overs   = gc('overs',   as_int=False)
+                        b_maidens = gc('mdns',    as_int=True)
+                        b_runs    = gc('runs',    as_int=True)
+                        b_wickets = gc('wkts',    as_int=True)
+                        b_nb      = gc('nb',      as_int=True)
+                        b_wd      = gc('wd',      as_int=True)
+                    else:
+                        b_overs   = gp(1, as_int=False)
+                        b_maidens = gp(2, as_int=True)
+                        b_runs    = gp(3, as_int=True)
+                        b_wickets = gp(4, as_int=True)
+                        b_nb      = gp(5, as_int=True)
+                        b_wd      = gp(6, as_int=True)
+
                     bowlers.append({
                         'player_id': int(pid_match.group(1)),
                         'name': player_link.get_text(strip=True),
@@ -275,6 +324,33 @@ def fetch_match():
         'away_batting': away['batters'],
         'away_bowling': away['bowlers'],
     })
+
+
+# ── Debug: dump raw scorecard table structure ──────────────────────────────────
+
+@app.route('/debug-match', methods=['POST'])
+def debug_match():
+    """Return the raw text of every table.scorecard on the match page — for diagnosis only."""
+    url = (request.json or {}).get('url', '').strip()
+    if not url or 'battrick.org' not in url:
+        return jsonify({'error': 'Invalid URL'}), 400
+    try:
+        resp = requests.get(url, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        return jsonify({'error': str(e)}), 502
+
+    soup = BeautifulSoup(resp.text, 'lxml')
+    tables = soup.select('table.scorecard')
+    result = []
+    for idx, t in enumerate(tables):
+        rows = []
+        for tr in t.find_all('tr'):
+            cells = [c.get_text(strip=True) for c in tr.find_all(['th', 'td'])]
+            if any(cells):
+                rows.append(cells)
+        result.append({'table_index': idx, 'rows': rows[:6]})  # first 6 rows per table
+    return jsonify({'ok': True, 'table_count': len(tables), 'tables': result})
 
 
 # ── Health check ───────────────────────────────────────────────────────────────
